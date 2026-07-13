@@ -191,11 +191,14 @@ export function ChatBar({
   const { stacked } = useComposerMetrics({ composerRef, composerSurfaceRef, editorRef, poppedOut })
   const hasComposerPayload = hasText || attachments.length > 0
   const canSubmit = busy || hasComposerPayload
-  const busyAction = busy && hasComposerPayload ? 'queue' : 'stop'
 
   // Steer only makes sense mid-turn, text-only (the gateway can't carry images
   // into a tool result) and never for a slash command (those execute inline).
   const canSteer = busy && !!onSteer && attachments.length === 0 && isSteerableText
+
+  // While busy: text redirects the live turn (Cursor-style stop-and-correct),
+  // attachments queue for the next turn, an empty composer stops.
+  const busyAction: 'steer' | 'queue' | 'stop' = canSteer ? 'steer' : hasComposerPayload ? 'queue' : 'stop'
 
   const showHelpHint = isHelpHint
 
@@ -206,7 +209,6 @@ export function ChatBar({
     activeQueueSessionKeyRef,
     attachments,
     busy,
-    canSteer,
     clearDraft,
     disabled,
     draftRef,
@@ -683,7 +685,6 @@ export function ChatBar({
       autoSpeak={autoSpeak}
       busy={busy}
       busyAction={busyAction}
-      canSteer={canSteer}
       canSubmit={canSubmit}
       compactModelPill={poppedOut}
       conversation={{
@@ -699,7 +700,6 @@ export function ChatBar({
       disabled={disabled}
       hasComposerPayload={hasComposerPayload}
       onDictate={dictate}
-      onSteer={steerDraft}
       onToggleAutoSpeak={handleToggleAutoSpeak}
       state={state}
       voiceStatus={voiceStatus}
