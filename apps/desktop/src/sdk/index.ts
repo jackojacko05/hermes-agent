@@ -177,7 +177,13 @@ export { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 export { Textarea } from '@/components/ui/textarea'
 export { Tip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 export type { GatewayEventListener } from '@/contrib/events'
-export type { HermesPlugin, PluginContext, PluginContribution, PluginRestOptions, PluginStorage } from '@/contrib/plugin'
+export type {
+  HermesPlugin,
+  PluginContext,
+  PluginContribution,
+  PluginRestOptions,
+  PluginStorage
+} from '@/contrib/plugin'
 
 // -- contracts ----------------------------------------------------------------
 
@@ -188,6 +194,9 @@ export type { HermesPlugin, PluginContext, PluginContribution, PluginRestOptions
  *  id with your plugin slug (`kanban:board-switcher`). */
 export { Contribute, type ContributeProps } from '@/contrib/react/contribute'
 export type { Contribution } from '@/contrib/types'
+/** Grab-to-pan for overflow containers (boards, timelines, wide tables) —
+ *  the shared scrub primitive; don't hand-roll drag-to-scroll. */
+export { type GrabScroll, useGrabScroll } from '@/hooks/use-grab-scroll'
 /** Localized copy — plugins reuse the app's strings (and stay translatable). */
 export { useI18n } from '@/i18n'
 export { triggerHaptic as haptic } from '@/lib/haptics'
