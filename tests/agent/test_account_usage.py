@@ -280,6 +280,25 @@ def test_codex_usage_allows_request_when_windows_have_capacity(monkeypatch):
     )
 
 
+def test_codex_usage_allows_request_when_secondary_window_is_omitted(monkeypatch):
+    payload = {
+        "rate_limit": {
+            "primary_window": {"used_percent": 25},
+        },
+        "credits": {"has_credits": False, "balance": "0"},
+    }
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient([], payload),
+    )
+
+    assert account_usage.codex_usage_allows_request(
+        access_token="live-agent-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+
 def test_codex_usage_denies_request_when_credits_and_windows_exhausted(monkeypatch):
     payload = {
         "rate_limit": {
