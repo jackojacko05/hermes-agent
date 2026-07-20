@@ -580,9 +580,11 @@ def codex_usage_allows_request(
             return False
         used_values = []
         for key in ("primary_window", "secondary_window"):
-            window = rate_limit.get(key) or {}
-            if not isinstance(window, dict):
+            window = rate_limit.get(key)
+            if window in (None, {}):
                 continue
+            if not isinstance(window, dict):
+                return False
             used = window.get("used_percent")
             if not _is_finite_num(used):
                 return False
