@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
     from typing import TypeGuard
 
 logger = logging.getLogger(__name__)
+
+_CODEX_RECOVERY_LOCK = threading.Lock()
 
 
 def _utc_now() -> datetime:
@@ -507,11 +510,24 @@ def _resolve_codex_usage_credentials(
     return entry.runtime_api_key, str(entry.runtime_base_url or base_url or "").strip(), None
 
 
-def _fetch_codex_account_usage(
+def _fetch_codex_usage_payload(
+    *,
+    access_token: str,
     base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-) -> Optional[AccountUsageSnapshot]:
-    token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
+    account_id: Optional[str] = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Fetch the raw Codex usage payload for one known credential.
+
+    This intentionally accepts a token directly instead of resolving through
+    ``CredentialPool.select()``.  A pool entry that received a 429 is marked
+    exhausted and therefore cannot be selected, but it is still the exact
+    credential whose account needs to be checked for recovery.
+    """
+    token = str(access_token or "").strip()
+    if not token:
+        raise ValueError("Codex usage check requires an access token")
+    resolved_base_url = str(base_url or "").strip()
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -519,10 +535,141 @@ def _fetch_codex_account_usage(
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
-    with httpx.Client(timeout=15.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.get(_resolve_codex_usage_url(resolved_base_url), headers=headers)
         response.raise_for_status()
     payload = response.json() or {}
+    if not isinstance(payload, dict):
+        raise ValueError("Codex usage response was not an object")
+    return payload
+
+
+def codex_usage_allows_request(
+    *,
+    access_token: str,
+    base_url: Optional[str] = None,
+    account_id: Optional[str] = None,
+    timeout: float = 5.0,
+) -> bool:
+    """Return whether a Codex credential should be retried now.
+
+    This is a read-only, request-triggered recovery check.  It treats a
+    positive Codex Credits balance (or unlimited credits) as sufficient even
+    when an included plan window is exhausted.  Without credits, every usage
+    window returned by the backend must be below 100 percent.  Any network,
+    authentication, shape, or provider error fails closed so the caller can
+    continue to its configured fallback chain.
+    """
+    try:
+        payload = _fetch_codex_usage_payload(
+            access_token=access_token,
+            base_url=base_url,
+            account_id=account_id,
+            timeout=timeout,
+        )
+        credits = payload.get("credits") or {}
+        if isinstance(credits, dict):
+            if credits.get("unlimited") is True:
+                return True
+            balance = credits.get("balance")
+            if credits.get("has_credits") is True and _is_finite_num(balance) and balance > 0:
+                return True
+
+        rate_limit = payload.get("rate_limit") or {}
+        if not isinstance(rate_limit, dict):
+            return False
+        used_values = []
+        for key in ("primary_window", "secondary_window"):
+            window = rate_limit.get(key) or {}
+            if not isinstance(window, dict):
+                continue
+            used = window.get("used_percent")
+            if not _is_finite_num(used):
+                return False
+            used_values.append(float(used))
+        return bool(used_values) and all(used < 100.0 for used in used_values)
+    except Exception as exc:
+        logger.debug("codex ▸ recovery usage check failed: %s", exc)
+        return False
+
+
+def try_recover_exhausted_codex() -> tuple[bool, Optional[dict[str, Any]]]:
+    """Check and re-enable a Codex credential after a usage-limit 429.
+
+    The boolean reports whether a matching exhausted pool entry was found;
+    callers use that signal to avoid bypassing a known 429 with a stale
+    singleton token.  The credential payload is returned only after the
+    read-only usage endpoint confirms that the account can make requests.
+    This function has no startup or background hook: callers invoke it only
+    while resolving Codex for an actual request.
+    """
+    with _CODEX_RECOVERY_LOCK:
+        try:
+            from agent.credential_pool import load_pool
+
+            pool = load_pool("openai-codex")
+            candidates = [
+                entry
+                for entry in pool.entries()
+                if entry.last_status == "exhausted"
+                and entry.last_error_code == 429
+                and (
+                    "usage_limit_reached" in str(entry.last_error_reason or "").lower()
+                    or "usage limit" in str(entry.last_error_message or "").lower()
+                )
+            ]
+        except Exception as exc:
+            logger.debug("codex ▸ recovery pool inspection failed: %s", exc)
+            return False, None
+
+        if not candidates:
+            return False, None
+
+        for entry in candidates:
+            token = str(getattr(entry, "runtime_api_key", "") or "").strip()
+            if not token:
+                continue
+            base_url = str(
+                getattr(entry, "runtime_base_url", "")
+                or getattr(entry, "base_url", "")
+                or "https://chatgpt.com/backend-api/codex"
+            ).strip()
+            if not codex_usage_allows_request(
+                access_token=token,
+                base_url=base_url,
+            ):
+                logger.info(
+                    "codex ▸ usage limit still active for credential %s",
+                    getattr(entry, "id", "?"),
+                )
+                continue
+            recovered = pool.clear_exhaustion(entry.id)
+            if recovered is None:
+                continue
+            logger.info(
+                "codex ▸ usage available; re-enabled credential %s",
+                getattr(recovered, "id", "?"),
+            )
+            recovered_token = str(getattr(recovered, "runtime_api_key", "") or "").strip()
+            if recovered_token:
+                return True, {
+                    "api_key": recovered_token,
+                    "base_url": base_url,
+                    "pool": pool,
+                }
+        return True, None
+
+
+def _fetch_codex_account_usage(
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> Optional[AccountUsageSnapshot]:
+    token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
+    payload = _fetch_codex_usage_payload(
+        access_token=token,
+        base_url=resolved_base_url,
+        account_id=account_id,
+    )
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
     for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):

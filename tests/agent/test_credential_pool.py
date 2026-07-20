@@ -3426,3 +3426,55 @@ def test_sync_anthropic_entry_clears_all_error_fields(tmp_path, monkeypatch):
     assert synced.last_error_reason is None
     assert synced.last_error_message is None
     assert synced.last_error_reset_at is None
+
+
+def test_clear_exhaustion_reenables_only_matching_codex_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "codex-1",
+                        "label": "primary",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:device_code",
+                        "access_token": "token-1",
+                        "last_status": "exhausted",
+                        "last_status_at": time.time(),
+                        "last_error_code": 429,
+                        "last_error_reason": "usage_limit_reached",
+                        "last_error_message": "credits exhausted",
+                        "last_error_reset_at": time.time() + 3600,
+                    },
+                    {
+                        "id": "codex-2",
+                        "label": "secondary",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "token-2",
+                        "last_status": "dead",
+                        "last_error_code": 401,
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openai-codex")
+    recovered = pool.clear_exhaustion("codex-1")
+
+    assert recovered is not None
+    assert recovered.last_status == "ok"
+    assert recovered.last_error_code is None
+    assert recovered.last_error_reset_at is None
+    assert next(entry for entry in pool.entries() if entry.id == "codex-2").last_status == "dead"
+
+    reloaded = load_pool("openai-codex")
+    assert next(entry for entry in reloaded.entries() if entry.id == "codex-1").last_status == "ok"

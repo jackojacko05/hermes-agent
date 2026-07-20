@@ -605,6 +605,31 @@ class CredentialPool:
     def entries(self) -> List[PooledCredential]:
         return list(self._entries)
 
+    def clear_exhaustion(self, credential_id: str) -> Optional[PooledCredential]:
+        """Re-enable one rate-limited credential after an external recovery check.
+
+        This is deliberately narrower than ``auth reset``: it only clears a
+        transient ``exhausted`` entry identified by ID.  Terminal ``dead``
+        credentials and all other entries remain untouched.
+        """
+        with self._lock:
+            entry = next((candidate for candidate in self._entries if candidate.id == credential_id), None)
+            if entry is None or entry.last_status != STATUS_EXHAUSTED:
+                return None
+            cleared = replace(
+                entry,
+                last_status=STATUS_OK,
+                last_status_at=None,
+                last_error_code=None,
+                last_error_reason=None,
+                last_error_message=None,
+                last_error_reset_at=None,
+            )
+            self._replace_entry(entry, cleared)
+            self._persist()
+            self._last_no_entries_log_at = None
+            return cleared
+
     def current(self) -> Optional[PooledCredential]:
         if not self._current_id:
             return None
