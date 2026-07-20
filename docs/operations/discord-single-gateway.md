@@ -67,3 +67,18 @@ When Discord must be tested from the Mac, stop or disable the VPS Discord
 adapter first, then enable the Mac adapter. Never run both hosts with the same
 token. A separate Discord application/token and test channel are safer when
 simultaneous testing is required.
+
+## Codex fallback model policy
+
+When the VPS primary provider (Grok) is unavailable, keep the first Codex
+fallback on the lightweight `gpt-5.6-luna` model:
+
+```yaml
+fallback_providers:
+  - provider: openai-codex
+    model: gpt-5.6-luna
+```
+
+This default does not restrict explicit model selection. The Codex catalog
+continues to expose `gpt-5.6-sol` and `gpt-5.6-terra` (plus their `-pro`
+variants) when a model is selected directly.
