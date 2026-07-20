@@ -425,6 +425,96 @@ class TestReadCodexAccessToken:
 
         assert result == valid_jwt
 
+    def test_exhausted_usage_limit_recovers_from_live_usage(self):
+        entry = SimpleNamespace(
+            id="codex-1",
+            last_status="exhausted",
+            last_error_code=429,
+            last_error_reason="usage_limit_reached",
+            last_error_message="",
+            runtime_api_key="pool-token",
+            runtime_base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+        class _Pool:
+            def entries(self):
+                return [entry]
+
+            def clear_exhaustion(self, credential_id):
+                assert credential_id == "codex-1"
+                entry.last_status = "ok"
+                return entry
+
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)), \
+             patch("agent.credential_pool.load_pool", return_value=_Pool()), \
+             patch("agent.account_usage.codex_usage_allows_request", return_value=True) as check:
+            result = _read_codex_access_token()
+
+        assert result == "pool-token"
+        check.assert_called_once_with(
+            access_token="pool-token",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+
+    def test_exhausted_pool_recovery_uses_real_pool_storage(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "auth.json").write_text(json.dumps({
+            "version": 1,
+            "credential_pool": {
+                "openai-codex": [{
+                    "id": "codex-1",
+                    "label": "primary",
+                    "auth_type": "oauth",
+                    "priority": 0,
+                    "source": "manual:device_code",
+                    "access_token": "pool-token",
+                    "refresh_token": "refresh-token",
+                    "last_status": "exhausted",
+                    "last_error_code": 429,
+                    "last_error_reason": "usage_limit_reached",
+                }],
+            },
+        }))
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        with patch("agent.account_usage.codex_usage_allows_request", return_value=True):
+            assert _read_codex_access_token() == "pool-token"
+
+        persisted = json.loads((hermes_home / "auth.json").read_text())
+        recovered = persisted["credential_pool"]["openai-codex"][0]
+        assert recovered["last_status"] == "ok"
+        assert recovered["last_error_code"] is None
+
+    def test_exhausted_usage_limit_does_not_bypass_to_legacy_token(self):
+        entry = SimpleNamespace(
+            id="codex-1",
+            last_status="exhausted",
+            last_error_code=429,
+            last_error_reason="usage_limit_reached",
+            last_error_message="",
+            runtime_api_key="pool-token",
+            runtime_base_url="https://chatgpt.com/backend-api/codex",
+        )
+        pool = SimpleNamespace(entries=lambda: [entry])
+
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)), \
+             patch("agent.credential_pool.load_pool", return_value=pool), \
+             patch("agent.account_usage.codex_usage_allows_request", return_value=False), \
+             patch("hermes_cli.auth._read_codex_tokens", return_value={
+                 "tokens": {"access_token": "legacy-token"},
+             }):
+            assert _read_codex_access_token() is None
+
+    def test_selected_codex_entry_skips_recovery_usage_check(self):
+        entry = SimpleNamespace(
+            runtime_api_key="healthy-pool-token",
+            last_status="ok",
+        )
+        with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, entry)), \
+             patch("agent.account_usage.codex_usage_allows_request", side_effect=AssertionError):
+            assert _read_codex_access_token() == "healthy-pool-token"
+
     def test_missing_returns_none(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir(parents=True, exist_ok=True)

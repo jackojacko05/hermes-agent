@@ -237,6 +237,69 @@ def test_codex_usage_treats_wham_used_percent_as_used_not_remaining(monkeypatch)
     assert "86% used" not in rendered
 
 
+def test_codex_usage_allows_request_with_positive_credits(monkeypatch):
+    """Purchased Codex credits can make a request valid despite plan windows."""
+    payload = {
+        "rate_limit": {
+            "primary_window": {"used_percent": 100},
+            "secondary_window": {"used_percent": 100},
+        },
+        "credits": {"has_credits": True, "balance": 3.5},
+    }
+    calls = []
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient(calls, payload),
+    )
+
+    assert account_usage.codex_usage_allows_request(
+        access_token="live-agent-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+    assert calls[0]["url"] == "https://chatgpt.com/backend-api/wham/usage"
+
+
+def test_codex_usage_allows_request_when_windows_have_capacity(monkeypatch):
+    payload = {
+        "rate_limit": {
+            "primary_window": {"used_percent": 99.9},
+            "secondary_window": {"used_percent": 0},
+        },
+        "credits": {"has_credits": False},
+    }
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient([], payload),
+    )
+
+    assert account_usage.codex_usage_allows_request(
+        access_token="live-agent-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+
+def test_codex_usage_denies_request_when_credits_and_windows_exhausted(monkeypatch):
+    payload = {
+        "rate_limit": {
+            "primary_window": {"used_percent": 100},
+            "secondary_window": {"used_percent": 100},
+        },
+        "credits": {"has_credits": False},
+    }
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient([], payload),
+    )
+
+    assert not account_usage.codex_usage_allows_request(
+        access_token="live-agent-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+
 # ── Banked rate-limit reset credits (`/usage reset`) ─────────────────────────
 
 

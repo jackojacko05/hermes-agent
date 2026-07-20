@@ -131,6 +131,25 @@ _LOGGED_UNSUPPORTED_EXTPROC_KEYS: set = set()
 _LOGGED_UNSUPPORTED_OAUTH_KEYS: set = set()
 
 
+def _try_recover_exhausted_codex() -> Tuple[bool, Optional[str]]:
+    """Re-enable Codex after a usage-limit recovery, only when Codex is requested.
+
+    This is intentionally called from the Codex credential-resolution path,
+    never from the Grok/primary path or a background timer.  The pool entry is
+    checked directly because ``pool.select()`` excludes credentials marked
+    exhausted.  A successful read-only Usage API check clears only that entry
+    and returns its token for the current request to retry once.
+    """
+    try:
+        from agent.account_usage import try_recover_exhausted_codex
+
+        attempted, recovered = try_recover_exhausted_codex()
+    except Exception as exc:
+        logger.debug("Codex recovery: usage checker unavailable: %s", exc)
+        return True, None
+    return attempted, (recovered or {}).get("api_key")
+
+
 def _resolve_aux_verify(base_url: Optional[str]) -> Any:
     """Resolve httpx ``verify`` for an auxiliary-client base_url.
 
@@ -1891,6 +1910,13 @@ def _read_codex_access_token() -> Optional[str]:
         token = _pool_runtime_api_key(entry)
         if token:
             return token
+        recovery_attempted, recovered_token = _try_recover_exhausted_codex()
+        if recovered_token:
+            return recovered_token
+        if recovery_attempted:
+            # Do not bypass a real usage-limit exhaustion with a legacy
+            # singleton token and immediately repeat the same 429.
+            return None
 
     try:
         from hermes_cli.auth import _read_codex_tokens

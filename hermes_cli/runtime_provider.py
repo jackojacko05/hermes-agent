@@ -21,6 +21,7 @@ from agent.credential_pool import (
 from agent.secret_scope import get_secret as _get_secret
 from hermes_cli.auth import (
     AuthError,
+    CODEX_RATE_LIMITED_CODE,
     DEFAULT_CODEX_BASE_URL,
     DEFAULT_QWEN_BASE_URL,
     DEFAULT_XAI_OAUTH_BASE_URL,
@@ -1758,6 +1759,54 @@ def resolve_runtime_provider(
                 pool=pool,
                 target_model=target_model,
             )
+
+        # A Codex pool can contain credentials that are all frozen behind a
+        # provider-reported usage-limit 429.  Do the read-only Usage API check
+        # only on this actual Codex resolution path; healthy Grok/primary
+        # requests never reach this branch.  If recovery is unavailable,
+        # surface the known quota error instead of retrying a stale singleton
+        # token that will produce the same 429 again.
+        if provider == "openai-codex" and entry is None:
+            try:
+                from agent.account_usage import try_recover_exhausted_codex
+
+                recovery_attempted, recovered = try_recover_exhausted_codex()
+            except Exception as exc:
+                logger.debug("Codex usage recovery check failed: %s", exc)
+                recovery_attempted, recovered = False, None
+            if recovered:
+                recovered_pool = recovered.get("pool")
+                recovered_entry = None
+                if recovered_pool is not None:
+                    try:
+                        recovered_entry = recovered_pool.select()
+                    except Exception as exc:
+                        logger.debug("Codex recovered pool selection failed: %s", exc)
+                if recovered_entry is not None:
+                    return _resolve_runtime_from_pool_entry(
+                        provider="openai-codex",
+                        entry=recovered_entry,
+                        requested_provider=requested_provider,
+                        model_cfg=model_cfg,
+                        pool=recovered_pool,
+                        target_model=target_model,
+                    )
+                return {
+                    "provider": "openai-codex",
+                    "api_mode": "codex_responses",
+                    "base_url": recovered.get("base_url", "").rstrip("/") or DEFAULT_CODEX_BASE_URL,
+                    "api_key": recovered.get("api_key", ""),
+                    "source": "credential_pool_recovery",
+                    "last_refresh": None,
+                    "requested_provider": requested_provider,
+                }
+            if recovery_attempted:
+                raise AuthError(
+                    "Codex provider quota exhausted (429); retry after the usage limit resets.",
+                    provider="openai-codex",
+                    code=CODEX_RATE_LIMITED_CODE,
+                    relogin_required=False,
+                )
 
     if provider == "nous":
         try:

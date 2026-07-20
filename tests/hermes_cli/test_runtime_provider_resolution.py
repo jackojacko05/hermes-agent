@@ -301,6 +301,60 @@ def test_resolve_runtime_provider_codex(monkeypatch):
     assert resolved["requested_provider"] == "openai-codex"
 
 
+def test_resolve_runtime_provider_recovers_exhausted_codex_pool(monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return None
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+    monkeypatch.setattr(
+        "agent.account_usage.try_recover_exhausted_codex",
+        lambda: (True, {
+            "api_key": "recovered-codex-token",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+        }),
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: (_ for _ in ()).throw(AssertionError("stale singleton must not be used")),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="openai-codex")
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["api_key"] == "recovered-codex-token"
+    assert resolved["source"] == "credential_pool_recovery"
+
+
+def test_resolve_runtime_provider_keeps_fallback_when_codex_still_exhausted(monkeypatch):
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return None
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openai-codex")
+    monkeypatch.setattr(rp, "load_pool", lambda _provider: _Pool())
+    monkeypatch.setattr(
+        "agent.account_usage.try_recover_exhausted_codex",
+        lambda: (True, None),
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: (_ for _ in ()).throw(AssertionError("stale singleton must not be used")),
+    )
+
+    with pytest.raises(rp.AuthError, match="quota exhausted"):
+        rp.resolve_runtime_provider(requested="openai-codex")
+
+
 def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
     monkeypatch.setattr(
